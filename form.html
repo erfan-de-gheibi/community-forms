@@ -1,0 +1,282 @@
+<!-- Community Forms — https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME — MIT License -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Form</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="center" style="padding-top:60px;">
+    <div class="spinner spinner-dark" style="margin:0 auto 14px;"></div>
+    <p class="muted">Loading form…</p>
+  </div>
+</div>
+
+<script>
+// Fetch github.js fresh every single load instead of a cacheable <script src> —
+// this is the app's real logic, and it must never be able to go stale the way
+// a plain script tag can when GitHub Pages' CDN or the browser holds onto an
+// old copy.
+function loadAppScript(path) {
+  return fetch(`${path}?t=${Date.now()}`, { cache: "no-store" })
+    .then(res => {
+      if (!res.ok) throw new Error(`Fetching ${path} failed (${res.status})`);
+      return res.text();
+    })
+    .then(code => new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.textContent = code;
+      script.onerror = () => reject(new Error(`${path} failed to execute`));
+      document.head.appendChild(script); // executes synchronously, exactly like a normal <script> tag
+      resolve();
+    }));
+}
+</script>
+<script>
+const wrap = document.getElementById("wrap");
+const params = new URLSearchParams(location.search);
+const formId = (params.get("form") || "").trim();
+let OWNER, REPO; // set once github.js has loaded, see bottom of file
+const pageLoadedAt = Date.now();
+const MAX_TEXT_LEN_CEILING = 20000; // hard ceiling regardless of what a form author sets
+let submissionToken = null; // fetched fresh below — never cached via a <script> tag
+
+function renderError(title, msg) {
+  wrap.innerHTML = `
+    <div class="card center">
+      <h1>${escapeHtml(title)}</h1>
+      <p class="muted">${escapeHtml(msg)}</p>
+    </div>`;
+}
+
+async function loadForm() {
+  if (!OWNER || !REPO) return renderError("Site not set up", "This page couldn't work out which GitHub repo it belongs to.");
+  if (!formId) return renderError("No form specified", "This link is missing its form ID.");
+  try {
+    // Read straight from GitHub's live API (not a CDN) so edits/closes/reopens
+    // show up immediately instead of waiting on caching we can't control.
+    const [formResult, token] = await Promise.all([
+      ghGetJson(OWNER, REPO, `forms/${formId}.json`, null),
+      fetchSubmissionToken(OWNER, REPO),
+    ]);
+    if (!formResult) return renderError("Form not found", "This form doesn't exist or may have been removed.");
+    submissionToken = token;
+    renderForm(formResult.data);
+  } catch (e) {
+    renderError("Couldn't load this form", "Check your connection and try reloading the page.");
+  }
+}
+
+function imageUrl(block) {
+  if (block.externalUrl) return block.externalUrl;
+  if (block.path) return `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@main/${block.path}`;
+  return "";
+}
+
+/** Blocks with no answer: static text and images. Returns HTML or "" if this isn't one. */
+function nonInputBlock(f) {
+  if (f.type === "static_text") {
+    return `<div class="field"><p style="white-space:pre-wrap;">${escapeHtml(f.text || "")}</p></div>`;
+  }
+  if (f.type === "image") {
+    const url = imageUrl(f);
+    if (!url) return "";
+    return `<div class="field"><img src="${escapeHtml(url)}" alt="${escapeHtml(f.alt || "")}" style="max-width:100%; border-radius:10px; display:block;"></div>`;
+  }
+  return "";
+}
+
+function fieldControl(f) {
+  const nonInput = nonInputBlock(f);
+  if (nonInput) return nonInput;
+
+  const req = f.required ? `<span class="required-mark">*</span>` : "";
+  const label = `<label for="${f.id}">${escapeHtml(f.label)}${req}</label>`;
+
+  if (f.type === "text" || f.type === "textarea") {
+    const max = Math.min(f.maxLength || 500, MAX_TEXT_LEN_CEILING);
+    const tag = f.type === "textarea"
+      ? `<textarea id="${f.id}" name="${f.id}" maxlength="${max}" ${f.required ? "required" : ""}></textarea>`
+      : `<input type="text" id="${f.id}" name="${f.id}" maxlength="${max}" ${f.required ? "required" : ""}>`;
+    return `<div class="field">${label}${tag}<div class="charcount" data-for="${f.id}">0 / ${max}</div></div>`;
+  }
+  if (f.type === "email") {
+    return `<div class="field">${label}<input type="email" id="${f.id}" name="${f.id}" maxlength="254" ${f.required ? "required" : ""}></div>`;
+  }
+  if (f.type === "number") {
+    return `<div class="field">${label}<input type="number" id="${f.id}" name="${f.id}" ${f.required ? "required" : ""}></div>`;
+  }
+  if (f.type === "date") {
+    return `<div class="field">${label}<input type="date" id="${f.id}" name="${f.id}" ${f.required ? "required" : ""}></div>`;
+  }
+  if (f.type === "select") {
+    const opts = (f.options || []).map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+    return `<div class="field">${label}<select id="${f.id}" name="${f.id}" ${f.required ? "required" : ""}>
+      <option value="" disabled selected>Choose…</option>${opts}</select></div>`;
+  }
+  if (f.type === "radio") {
+    const opts = (f.options || []).map((o, i) =>
+      `<label><input type="radio" name="${f.id}" value="${escapeHtml(o)}" ${f.required && i === 0 ? "required" : ""}> ${escapeHtml(o)}</label>`
+    ).join("");
+    return `<div class="field"><fieldset style="border:none;padding:0;margin:0;"><legend>${escapeHtml(f.label)}${req}</legend>
+      <div class="choice-list">${opts}</div></fieldset></div>`;
+  }
+  if (f.type === "checkbox") {
+    const opts = (f.options || []).map(o =>
+      `<label><input type="checkbox" name="${f.id}" value="${escapeHtml(o)}"> ${escapeHtml(o)}</label>`
+    ).join("");
+    return `<div class="field"><fieldset style="border:none;padding:0;margin:0;"><legend>${escapeHtml(f.label)}${req}</legend>
+      <div class="choice-list">${opts}</div></fieldset></div>`;
+  }
+  return "";
+}
+
+function renderForm(form) {
+  if (form.closed) {
+    wrap.innerHTML = `
+      <div class="card center">
+        <h1>${escapeHtml(form.title)}</h1>
+        <p class="banner banner-info" style="display:inline-block;">This form is no longer accepting responses.</p>
+      </div>`;
+    return;
+  }
+
+  const fieldsHtml = (form.fields || []).map(fieldControl).join("");
+
+  wrap.innerHTML = `
+    <div class="card">
+      <h1>${escapeHtml(form.title)}</h1>
+      ${form.description ? `<p class="muted">${escapeHtml(form.description)}</p>` : ""}
+      <div id="errorBanner"></div>
+      <form id="respForm" novalidate>
+        ${fieldsHtml}
+        <!-- honeypot: real people never fill this in -->
+        <div class="hp-field" aria-hidden="true">
+          <label for="hp_website">Leave this field blank</label>
+          <input type="text" id="hp_website" name="hp_website" tabindex="-1" autocomplete="off">
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" id="submitBtn">Submit</button>
+      </form>
+    </div>
+    <p class="muted center">Powered by a plain static page — no account needed.</p>
+  `;
+
+  document.querySelectorAll("textarea[maxlength], input[maxlength]").forEach(el => {
+    const counter = document.querySelector(`.charcount[data-for="${el.id}"]`);
+    if (!counter) return;
+    const max = el.getAttribute("maxlength");
+    const update = () => counter.textContent = `${el.value.length} / ${max}`;
+    el.addEventListener("input", update);
+    update();
+  });
+
+  document.getElementById("respForm").addEventListener("submit", (e) => onSubmit(e, form));
+}
+
+function collectAnswers(form) {
+  const lines = [];
+  for (const f of form.fields || []) {
+    if (f.type === "static_text" || f.type === "image") continue; // not answerable
+    let value = "";
+    if (f.type === "checkbox") {
+      const checked = Array.from(document.querySelectorAll(`input[name="${f.id}"]:checked`)).map(i => i.value);
+      value = checked.join(", ");
+    } else if (f.type === "radio") {
+      const sel = document.querySelector(`input[name="${f.id}"]:checked`);
+      value = sel ? sel.value : "";
+    } else {
+      const el = document.getElementById(f.id);
+      value = el ? el.value.trim() : "";
+    }
+    if (f.required && !value) {
+      throw { fieldId: f.id, message: `Please fill in "${f.label}".` };
+    }
+    lines.push(`**${f.label}**\n${value || "_(no answer)_"}`);
+  }
+  return lines.join("\n\n");
+}
+
+async function onSubmit(e, form) {
+  e.preventDefault();
+  const errorBanner = document.getElementById("errorBanner");
+  errorBanner.innerHTML = "";
+
+  // Honeypot: if filled, silently pretend success (don't tip off bots).
+  const hp = document.getElementById("hp_website").value;
+
+  // Basic timing check: real humans take at least a couple seconds.
+  const tooFast = Date.now() - pageLoadedAt < 1500;
+
+  let body;
+  try {
+    body = collectAnswers(form);
+  } catch (err) {
+    errorBanner.innerHTML = `<div class="banner banner-error">${escapeHtml(err.message)}</div>`;
+    document.getElementById(err.fieldId)?.focus();
+    return;
+  }
+
+  const btn = document.getElementById("submitBtn");
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> Submitting…`;
+
+  if (hp || tooFast) {
+    // Quietly no-op for likely-bot traffic, but still show success so we
+    // don't reveal the detection to whatever is submitting.
+    setTimeout(() => showConfirmation(form), 500);
+    return;
+  }
+
+  if (!submissionToken) {
+    btn.disabled = false;
+    btn.textContent = "Submit";
+    errorBanner.innerHTML = `<div class="banner banner-error">Couldn't reach the site's configuration. Please reload the page and try again.</div>`;
+    return;
+  }
+
+  try {
+    const title = `[${form.title}] response — ${new Date().toISOString()}`;
+    await ghCreateIssue(OWNER, REPO, title, body, [formId], submissionToken);
+    showConfirmation(form);
+  } catch (err) {
+    console.error("Form submission failed:", err);
+    btn.disabled = false;
+    btn.textContent = "Submit";
+    errorBanner.innerHTML = `<div class="banner banner-error">Something went wrong sending your response. Please try again in a moment. (If this keeps happening, the site owner can check the browser console for details.)</div>`;
+  }
+}
+
+function showConfirmation(form) {
+  wrap.innerHTML = `
+    <div class="card center">
+      <h1>Thanks!</h1>
+      <p>Your response to <strong>${escapeHtml(form.title)}</strong> was recorded.</p>
+      <button class="btn btn-ghost" onclick="location.reload()">Submit another response</button>
+    </div>`;
+}
+
+(async function start() {
+  try {
+    await loadAppScript("assets/github.js");
+    const detected = detectOwnerRepo();
+    OWNER = detected?.owner;
+    REPO = detected?.repo;
+    loadForm();
+  } catch (e) {
+    console.error("Startup failed:", e);
+    wrap.innerHTML = `<div class="card center"><h1>Couldn't start the page</h1>
+      <p class="muted">${e.message || "Unknown error"}</p>
+      <p class="muted">Check that this URL loads real JavaScript (not a 404 page):
+      <a href="assets/github.js">assets/github.js</a></p></div>`;
+  }
+})();
+</script>
+</body>
+</html>

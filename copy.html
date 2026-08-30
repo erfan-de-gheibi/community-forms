@@ -1,0 +1,230 @@
+<!-- Community Forms — https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME — MIT License -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Get your own Community Forms</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="center" style="padding-top:60px;">
+    <div class="spinner spinner-dark" style="margin:0 auto 14px;"></div>
+    <p class="muted">Loading…</p>
+  </div>
+</div>
+
+<script>
+function loadAppScript(path) {
+  return fetch(`${path}?t=${Date.now()}`, { cache: "no-store" })
+    .then(res => {
+      if (!res.ok) throw new Error(`Fetching ${path} failed (${res.status})`);
+      return res.text();
+    })
+    .then(code => new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.textContent = code;
+      script.onerror = () => reject(new Error(`${path} failed to execute`));
+      document.head.appendChild(script); // executes synchronously, exactly like a normal <script> tag
+      resolve();
+    }));
+}
+</script>
+<script>
+const wrap = document.getElementById("wrap");
+let TEMPLATE_OWNER, TEMPLATE_REPO; // set once github.js has loaded, see bottom of file
+let step = 1;
+let state = { username: "", repoName: "", adminToken: "" };
+
+function renderStep() {
+  if (step === 1) return renderStep1();
+  if (step === 2) return renderStep2();
+  if (step === 3) return renderStep3();
+  if (step === 4) return renderStep4();
+}
+
+function stepShell(title, eyebrow, bodyHtml) {
+  wrap.innerHTML = `
+    <div class="card">
+      <span class="eyebrow">${eyebrow}</span>
+      <h1>${title}</h1>
+      ${bodyHtml}
+    </div>`;
+}
+
+/* Step 1: get your own copy */
+function renderStep1() {
+  stepShell("Get your own copy", "Step 1 of 4", `
+    <p>Two ways to do this — pick one:</p>
+    <div class="card" style="background:#fbfaf6;">
+      <h3>Recommended: Use as template</h3>
+      <p class="muted">Creates a brand-new, independent copy under your account. Nothing links back here.</p>
+      <a class="btn btn-marigold" href="https://github.com/${TEMPLATE_OWNER}/${TEMPLATE_REPO}/generate" target="_blank" rel="noopener">Create my copy ↗</a>
+    </div>
+    <div class="card" style="background:#fbfaf6;">
+      <h3>Alternative: Fork</h3>
+      <p class="muted">Keeps a link to this repo so you can pull future improvements with one click. One extra step: you'll need to turn Issues on afterward (Settings → General → Features → Issues) since forks have it off by default.</p>
+      <a class="btn btn-ghost" href="https://github.com/${TEMPLATE_OWNER}/${TEMPLATE_REPO}/fork" target="_blank" rel="noopener">Fork instead ↗</a>
+    </div>
+    <button class="btn btn-primary btn-block" id="next1">I've made my copy — continue</button>
+  `);
+  document.getElementById("next1").addEventListener("click", () => { step = 2; renderStep(); });
+}
+
+/* Step 2: username + repo name, then Pages instructions */
+function renderStep2() {
+  stepShell("Turn on GitHub Pages", "Step 2 of 4", `
+    <div class="field">
+      <label for="usernameInput">Your GitHub username</label>
+      <input type="text" id="usernameInput" value="${escapeHtml(state.username)}" placeholder="e.g. janedoe">
+    </div>
+    <div class="field">
+      <label for="repoNameInput">Your new repo's name</label>
+      <input type="text" id="repoNameInput" value="${escapeHtml(state.repoName)}">
+    </div>
+    <div id="pagesLinkArea"></div>
+    <ol style="padding-left:20px;">
+      <li>Open the Pages settings link above.</li>
+      <li>Under "Build and deployment", set Source to "Deploy from a branch".</li>
+      <li>Branch: <strong>main</strong>, folder: <strong>/ (root)</strong>. Save.</li>
+    </ol>
+    <div class="btn-row">
+      <button class="btn btn-ghost" id="back2">← Back</button>
+      <button class="btn btn-primary" id="next2">Done — continue</button>
+    </div>
+  `);
+  const update = () => {
+    state.username = document.getElementById("usernameInput").value.trim();
+    state.repoName = document.getElementById("repoNameInput").value.trim();
+    const area = document.getElementById("pagesLinkArea");
+    if (state.username && state.repoName) {
+      area.innerHTML = `<p><a class="btn btn-marigold" href="https://github.com/${state.username}/${state.repoName}/settings/pages" target="_blank" rel="noopener">Open Pages settings ↗</a></p>`;
+    } else {
+      area.innerHTML = `<p class="muted">Fill in both fields above to get a direct link.</p>`;
+    }
+  };
+  document.getElementById("usernameInput").addEventListener("input", update);
+  document.getElementById("repoNameInput").addEventListener("input", update);
+  update();
+  document.getElementById("back2").addEventListener("click", () => { step = 1; renderStep(); });
+  document.getElementById("next2").addEventListener("click", () => {
+    if (!state.username || !state.repoName) { alert("Fill in your username and repo name first."); return; }
+    step = 3; renderStep();
+  });
+}
+
+/* Step 3: admin token */
+function renderStep3() {
+  const tokenUrl = "https://github.com/settings/tokens/new?scopes=public_repo&description=Community%20Forms%20Admin&default_expires_at=none";
+  stepShell("Create your admin token", "Step 3 of 4", `
+    <p>This lets <em>you</em> publish forms later. It's never shared publicly.</p>
+    <p><a class="btn btn-marigold" href="${tokenUrl}" target="_blank" rel="noopener">Open GitHub to create my token ↗</a></p>
+    <div class="field">
+      <label for="adminTokenInput">Paste it here</label>
+      <input type="text" id="adminTokenInput" placeholder="ghp_...">
+    </div>
+    <div id="step3Error"></div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" id="back3">← Back</button>
+      <button class="btn btn-primary" id="next3">Continue</button>
+    </div>
+  `);
+  document.getElementById("back3").addEventListener("click", () => { step = 2; renderStep(); });
+  document.getElementById("next3").addEventListener("click", async () => {
+    const val = document.getElementById("adminTokenInput").value.trim();
+    const errEl = document.getElementById("step3Error");
+    errEl.innerHTML = "";
+    if (!val) { errEl.innerHTML = `<div class="banner banner-error">Paste your token first.</div>`; return; }
+    const check = await ghCheckToken(val);
+    if (!check.ok) { errEl.innerHTML = `<div class="banner banner-error">That token didn't work.</div>`; return; }
+    state.adminToken = val;
+    step = 4; renderStep();
+  });
+}
+
+/* Step 4: guest submission token, then commit config.js */
+function renderStep4() {
+  const subTokenUrl = `https://github.com/settings/personal-access-tokens/new?name=community-forms-submissions&description=Lets+the+public+form+pages+create+GitHub+Issues+for+responses.+Issues-only+%E2%80%94+no+code+access.&expires_in=none&issues=write`;
+  stepShell("Create the guest submission token", "Step 4 of 4", `
+    <p>This one is different — it'll be visible in your site's code, so it's limited to only opening GitHub Issues.</p>
+    <p><a class="btn btn-marigold" href="${subTokenUrl}" target="_blank" rel="noopener">Open GitHub to create it ↗</a></p>
+    <ol style="padding-left:20px;">
+      <li>Confirm Resource owner is you.</li>
+      <li>Repository access → "Only select repositories" → pick <strong>${escapeHtml(state.repoName)}</strong>.</li>
+      <li>Confirm "Issues" shows Read and write, generate, and copy it.</li>
+    </ol>
+    <div class="field">
+      <label for="subTokenInput">Paste it here</label>
+      <input type="text" id="subTokenInput" placeholder="github_pat_...">
+    </div>
+    <div id="step4Error"></div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" id="back4">← Back</button>
+      <button class="btn btn-primary" id="finishBtn">Finish setup</button>
+    </div>
+  `);
+  document.getElementById("back4").addEventListener("click", () => { step = 3; renderStep(); });
+  document.getElementById("finishBtn").addEventListener("click", () => finishSetup());
+}
+
+async function finishSetup() {
+  const subToken = document.getElementById("subTokenInput").value.trim();
+  const errEl = document.getElementById("step4Error");
+  errEl.innerHTML = "";
+  if (!subToken) { errEl.innerHTML = `<div class="banner banner-error">Paste the submission token first.</div>`; return; }
+  const subCheck = await ghCheckToken(subToken);
+  if (!subCheck.ok) { errEl.innerHTML = `<div class="banner banner-error">That token didn't work — make sure you copied the whole thing, with no extra spaces.</div>`; return; }
+
+  const btn = document.getElementById("finishBtn");
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> Saving…`;
+  try {
+    const sha = await ghGetSha(state.username, state.repoName, "assets/config.js", state.adminToken);
+    const newContent = `window.SITE_CONFIG = {\n  SUBMISSION_TOKEN: "${scrambleToken(subToken)}",\n};\n`;
+    await ghPutContent(state.username, state.repoName, "assets/config.js", utf8ToBase64(newContent), "Configure guest submission token", state.adminToken, sha);
+
+    localStorage.setItem("cf_admin_token", state.adminToken);
+    wrap.innerHTML = `
+      <div class="card center">
+        <h1>All set!</h1>
+        <p>Your site will rebuild in about a minute. Then head to your own admin page to start creating forms:</p>
+        <p><a class="btn btn-primary" href="https://${state.username}.github.io/${state.repoName}/admin.html" target="_blank" rel="noopener">Open my admin page ↗</a></p>
+        <p class="muted">Bookmark that link — it's not listed anywhere on your public site.</p>
+      </div>`;
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Finish setup";
+    if (e.unblockUrl) {
+      errEl.innerHTML = `<div class="banner banner-error">
+        GitHub flagged this as a possible secret.
+        <a href="${e.unblockUrl}" target="_blank" rel="noopener">Click here to allow it</a>, then press Finish again.
+      </div>`;
+    } else {
+      errEl.innerHTML = `<div class="banner banner-error">Something went wrong — ${escapeHtml(e.message || "unknown error")}.</div>`;
+    }
+  }
+}
+
+(async function start() {
+  try {
+    await loadAppScript("assets/github.js");
+    const templateDetected = detectOwnerRepo();
+    TEMPLATE_OWNER = templateDetected?.owner;
+    TEMPLATE_REPO = templateDetected?.repo;
+    state.repoName = TEMPLATE_REPO || "";
+    renderStep();
+  } catch (e) {
+    console.error("Startup failed:", e);
+    wrap.innerHTML = `<div class="card center"><h1>Couldn't start the page</h1>
+      <p class="muted">${e.message || "Unknown error"}</p>
+      <p class="muted">Check that this URL loads real JavaScript (not a 404 page):
+      <a href="assets/github.js">assets/github.js</a></p></div>`;
+  }
+})();
+</script>
+</body>
+</html>

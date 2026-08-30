@@ -1,0 +1,804 @@
+<!-- Community Forms — https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME — MIT License -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Form admin</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap wrap--wide" id="wrap">
+  <div class="center" style="padding-top:60px;">
+    <div class="spinner spinner-dark" style="margin:0 auto 14px;"></div>
+    <p class="muted">Loading…</p>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator/qrcode.js"></script>
+<script>
+// Fetch github.js fresh every single load instead of a cacheable <script src> —
+// this is the app's real logic, and it must never be able to go stale the way
+// a plain script tag can when GitHub Pages' CDN or the browser holds onto an
+// old copy.
+function loadAppScript(path) {
+  return fetch(`${path}?t=${Date.now()}`, { cache: "no-store" })
+    .then(res => {
+      if (!res.ok) throw new Error(`Fetching ${path} failed (${res.status})`);
+      return res.text();
+    })
+    .then(code => new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.textContent = code;
+      script.onerror = () => reject(new Error(`${path} failed to execute`));
+      document.head.appendChild(script); // executes synchronously, exactly like a normal <script> tag
+      resolve();
+    }));
+}
+</script>
+<script>
+const wrap = document.getElementById("wrap");
+const ADMIN_TOKEN_KEY = "cf_admin_token";
+const SITE_ORIGIN = location.origin + location.pathname.replace(/admin\.html$/, "");
+
+let OWNER, REPO; // set once github.js (and detectOwnerRepo) has loaded, see bottom of file
+
+function getAdminToken() { return localStorage.getItem(ADMIN_TOKEN_KEY) || ""; }
+function setAdminToken(t) { localStorage.setItem(ADMIN_TOKEN_KEY, t); }
+function clearAdminToken() { localStorage.removeItem(ADMIN_TOKEN_KEY); }
+
+/** Shared "GitHub flagged this as a secret" banner + retry button, used anywhere a write can 409. */
+function writeErrorHtml(err, retryId) {
+  if (err.unblockUrl) {
+    return `<div class="banner banner-error">
+      GitHub flagged this as a possible secret and needs your OK once.
+      <a href="${err.unblockUrl}" target="_blank" rel="noopener">Click here to allow it</a>,
+      then come back and press retry.
+      <div style="margin-top:8px;"><button class="btn btn-ghost" id="${retryId}">Retry now</button></div>
+    </div>`;
+  }
+  return `<div class="banner banner-error">Something went wrong — ${escapeHtml(err.message || "unknown error")}.</div>`;
+}
+
+/** Reads assets/config.js LIVE via the Contents API (never cached — this always
+    reflects what's actually committed right now) and confirms the saved
+    submission token still actually works, not just that something's there. */
+async function checkConfigReal(owner, repo, token) {
+  const res = await fetch(`${GH_API}/repos/${owner}/${repo}/contents/assets/config.js?t=${Date.now()}`, {
+    headers: ghHeaders(token),
+  });
+  if (!res.ok) return false;
+  const body = await res.json();
+  const text = base64ToUtf8(body.content);
+  const m = text.match(/SUBMISSION_TOKEN:\s*"([^"]*)"/);
+  if (!m || !m[1] || m[1].startsWith("PASTE_")) return false;
+  const subCheck = await ghCheckToken(scrambleToken(m[1]));
+  return subCheck.ok;
+}
+
+async function boot() {
+  // Multi-device sign-in: admin.html#token=XXXX from the "sign in on another device" QR.
+  if (location.hash.startsWith("#token=")) {
+    const incoming = decodeURIComponent(location.hash.slice(7));
+    setAdminToken(incoming);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+
+  if (!OWNER || !REPO) {
+    wrap.innerHTML = `<div class="card center"><h1>Can't tell which repo this is</h1>
+      <p class="muted">This page expects to be served from a standard <code>username.github.io/reponame/</code> address. If you're using a custom domain, this build doesn't support auto-detection — see the README.</p></div>`;
+    return;
+  }
+
+  const token = getAdminToken();
+  if (!token) return renderTokenSetup();
+
+  const check = await ghCheckToken(token);
+  if (!check.ok) { clearAdminToken(); return renderTokenSetup("That saved sign-in stopped working — please sign in again."); }
+
+  const configReal = await checkConfigReal(OWNER, REPO, token);
+  if (!configReal) return renderSiteSetup(token);
+
+  renderDashboard(token);
+}
+
+/* ---------------- Step 1: admin sign-in token ---------------- */
+
+function renderTokenSetup(warning) {
+  const tokenUrl = "https://github.com/settings/tokens/new?scopes=public_repo&description=Community%20Forms%20Admin&default_expires_at=none";
+  wrap.innerHTML = `
+    <div class="card">
+      <span class="eyebrow">One-time setup</span>
+      <h1>Connect your GitHub account</h1>
+      ${warning ? `<div class="banner banner-error">${escapeHtml(warning)}</div>` : ""}
+      <ol style="padding-left:20px;">
+        <li>Click the button below.</li>
+        <li>Click the green <strong>“Generate token”</strong> button.</li>
+        <li>Copy the token GitHub shows you.</li>
+        <li>Paste it below.</li>
+      </ol>
+      <p><a class="btn btn-marigold" href="${tokenUrl}" target="_blank" rel="noopener">Open GitHub to create my token ↗</a></p>
+      <div class="field">
+        <label for="tokenInput">Paste your token here</label>
+        <input type="text" id="tokenInput" placeholder="ghp_..." autocomplete="off">
+      </div>
+      <div id="tokenError"></div>
+      <button class="btn btn-primary btn-block" id="tokenSaveBtn">Continue</button>
+      <p class="muted" style="margin-top:14px;">Stored only in this browser.</p>
+    </div>`;
+
+  document.getElementById("tokenSaveBtn").addEventListener("click", async () => {
+    const val = document.getElementById("tokenInput").value.trim();
+    const errEl = document.getElementById("tokenError");
+    errEl.innerHTML = "";
+    if (!val) { errEl.innerHTML = `<div class="banner banner-error">Paste your token first.</div>`; return; }
+    const check = await ghCheckToken(val);
+    if (!check.ok) { errEl.innerHTML = `<div class="banner banner-error">That token didn't work.</div>`; return; }
+    setAdminToken(val);
+    boot();
+  });
+}
+
+/* ---------------- Step 2: repo + guest submission token ---------------- */
+
+function renderSiteSetup(adminToken) {
+  const tokenUrl = `https://github.com/settings/personal-access-tokens/new?name=community-forms-submissions&description=Lets+the+public+form+pages+create+GitHub+Issues+for+responses.+Issues-only+%E2%80%94+no+code+access.&expires_in=none&issues=write`;
+  wrap.innerHTML = `
+    <div class="card">
+      <span class="eyebrow">One-time setup — step 2 of 2</span>
+      <h1>One more token</h1>
+      <p>This lets the public form pages record answers as GitHub Issues. It's
+      limited to only doing that — nothing else — because it'll be visible to
+      anyone who views the page source.</p>
+      <p><a class="btn btn-marigold" href="${tokenUrl}" target="_blank" rel="noopener">Create this token ↗</a></p>
+      <ol style="padding-left:20px;">
+        <li>Confirm Resource owner is you.</li>
+        <li>Repository access → "Only select repositories" → pick <strong>${escapeHtml(REPO)}</strong>.</li>
+        <li>Confirm "Issues" already shows Read and write, then Generate and copy it.</li>
+      </ol>
+      <div class="field">
+        <label for="subTokenInput">Paste it here</label>
+        <input type="text" id="subTokenInput" placeholder="github_pat_...">
+      </div>
+      <div id="setupError"></div>
+      <button class="btn btn-primary btn-block" id="setupSaveBtn">Save and continue</button>
+      <button class="btn btn-ghost btn-block" id="setupCancelBtn" style="margin-top:8px;">Cancel</button>
+    </div>`;
+
+  document.getElementById("setupSaveBtn").addEventListener("click", () => doSiteSetup(adminToken));
+  document.getElementById("setupCancelBtn").addEventListener("click", () => renderDashboard(adminToken));
+}
+
+async function doSiteSetup(adminToken) {
+  const subToken = document.getElementById("subTokenInput").value.trim();
+  const errEl = document.getElementById("setupError");
+  errEl.innerHTML = "";
+  if (!subToken) {
+    errEl.innerHTML = `<div class="banner banner-error">Paste the token first.</div>`;
+    return;
+  }
+  const subCheck = await ghCheckToken(subToken);
+  if (!subCheck.ok) {
+    errEl.innerHTML = `<div class="banner banner-error">That token didn't work — make sure you copied the whole thing, with no extra spaces.</div>`;
+    return;
+  }
+  const btn = document.getElementById("setupSaveBtn");
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> Saving…`;
+  try {
+    const sha = await ghGetSha(OWNER, REPO, "assets/config.js", adminToken);
+    const newContent = `window.SITE_CONFIG = {\n  SUBMISSION_TOKEN: "${scrambleToken(subToken)}",\n};\n`;
+    await ghPutContent(OWNER, REPO, "assets/config.js", utf8ToBase64(newContent), "Configure guest submission token", adminToken, sha);
+    renderDashboard(adminToken);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Save and continue";
+    errEl.innerHTML = writeErrorHtml(e, "setupRetryBtn");
+    document.getElementById("setupRetryBtn")?.addEventListener("click", () => doSiteSetup(adminToken));
+  }
+}
+
+/* ---------------- Dashboard ---------------- */
+
+async function getManifest(token) {
+  const existing = await ghGetJson(OWNER, REPO, "forms/manifest.json", token);
+  return existing || { data: { forms: [] }, sha: null };
+}
+
+async function renderDashboard(token) {
+  wrap.innerHTML = `
+    <div class="topbar">
+      <h1 class="mb-0">Your forms</h1>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="deviceQrBtn">Sign in on another device</button>
+        <button class="btn btn-ghost" id="updateSubTokenBtn">Update submission token</button>
+        <button class="btn btn-ghost" id="signOutBtn">Sign out</button>
+        <button class="btn btn-marigold" id="newFormBtn">+ New form</button>
+      </div>
+    </div>
+    <div id="listArea"><div class="center"><div class="spinner spinner-dark"></div></div></div>
+  `;
+  document.getElementById("signOutBtn").addEventListener("click", () => { clearAdminToken(); boot(); });
+  document.getElementById("newFormBtn").addEventListener("click", () => renderBuilder(token));
+  document.getElementById("deviceQrBtn").addEventListener("click", () => showDeviceQr(token));
+  document.getElementById("updateSubTokenBtn").addEventListener("click", () => renderSiteSetup(token));
+
+  const { data: manifest } = await getManifest(token);
+  const listArea = document.getElementById("listArea");
+
+  if (!manifest.forms.length) {
+    listArea.innerHTML = `<div class="card empty"><h3>No forms yet</h3><p>Click "+ New form" to build your first one.</p></div>`;
+    return;
+  }
+
+  listArea.innerHTML = `<div class="card">${manifest.forms.map(formRowHtml).join("")}</div>`;
+
+  manifest.forms.forEach(f => {
+    document.getElementById(`qr-${f.id}`).addEventListener("click", () => showQr(f));
+    document.getElementById(`copy-${f.id}`).addEventListener("click", () => copyLink(f));
+    document.getElementById(`toggle-${f.id}`).addEventListener("click", () => toggleClosed(f, token));
+    document.getElementById(`delete-${f.id}`).addEventListener("click", () => deleteForm(f, token));
+    document.getElementById(`edit-${f.id}`)?.addEventListener("click", () => editForm(f, token));
+    document.getElementById(`export-${f.id}`).addEventListener("click", () => exportResponses(f, token));
+  });
+}
+
+function formRowHtml(f) {
+  return `
+    <div class="form-row">
+      <div>
+        <div class="form-row-title">${escapeHtml(f.title)} ${f.closed ? '<span class="pill pill-closed">Closed</span>' : '<span class="pill">Open</span>'}</div>
+        <div class="muted" style="font-size:0.85rem;">${SITE_ORIGIN}form.html?form=${f.id}</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="qr-${f.id}">QR code</button>
+        <button class="btn btn-ghost" id="copy-${f.id}">Copy link</button>
+        <button class="btn btn-ghost" id="toggle-${f.id}">${f.closed ? "Reopen" : "Close"}</button>
+        ${f.closed ? `<button class="btn btn-ghost" id="edit-${f.id}">Edit</button>` : ""}
+        <button class="btn btn-ghost" id="export-${f.id}">Export CSV</button>
+        <button class="btn btn-danger" id="delete-${f.id}">Delete</button>
+      </div>
+    </div>`;
+}
+
+async function exportResponses(f, token) {
+  const btn = document.getElementById(`export-${f.id}`);
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  try {
+    const [{ data: formDoc }, issues] = await Promise.all([
+      ghGetJson(OWNER, REPO, `forms/${f.id}.json`, token),
+      ghListIssuesByLabel(OWNER, REPO, f.id, token),
+    ]);
+    const questionFields = (formDoc.fields || []).filter(field => field.type !== "static_text" && field.type !== "image");
+    const columns = questionFields.map(field => field.label);
+
+    // Collect any answer labels that don't match a current question (e.g. from
+    // before an edit) as extra trailing columns, so nothing is silently dropped.
+    const parsedRows = issues.map(issue => ({ issue, answers: parseSubmissionBody(issue.body) }));
+    const extraLabels = [];
+    parsedRows.forEach(({ answers }) => {
+      Object.keys(answers).forEach(label => {
+        if (!columns.includes(label) && !extraLabels.includes(label)) extraLabels.push(label);
+      });
+    });
+    const allColumns = [...columns, ...extraLabels];
+
+    const header = ["Submitted at", ...allColumns, "GitHub Issue"];
+    const rows = [header, ...parsedRows.map(({ issue, answers }) => [
+      issue.created_at,
+      ...allColumns.map(label => answers[label] ?? ""),
+      issue.html_url,
+    ])];
+
+    if (!issues.length) {
+      alert(`"${f.title}" has no responses yet.`);
+    } else {
+      downloadTextFile(`${f.id}-responses.csv`, toCsv(rows));
+    }
+  } catch (e) {
+    console.error("Export failed:", e);
+    alert("Couldn't export responses: " + (e.message || "unknown error"));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+
+function copyLink(f) {
+  const url = `${SITE_ORIGIN}form.html?form=${f.id}`;
+  navigator.clipboard?.writeText(url);
+  alert("Link copied:\n" + url);
+}
+
+function overlayShell(innerHtml) {
+  const overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px;";
+  overlay.innerHTML = `<div class="card center" style="max-width:360px; max-height:90vh; overflow:auto;">${innerHtml}</div>`;
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+/** Renders a QR code into el (an empty container) and returns the <img> element, or null on failure. */
+function renderQrInto(el, text) {
+  try {
+    const qr = qrcode(0, "M"); // 0 = let the library pick the smallest size that fits
+    qr.addData(text);
+    qr.make();
+    el.innerHTML = qr.createImgTag(6, 8);
+    return el.querySelector("img");
+  } catch (e) {
+    el.innerHTML = `<p class="banner banner-error">Couldn't draw the QR code (${escapeHtml(e.message || "unknown error")}) — use "Copy link" instead.</p>`;
+    return null;
+  }
+}
+
+function showQr(f) {
+  const url = `${SITE_ORIGIN}form.html?form=${f.id}`;
+  const overlay = overlayShell(`
+    <h3>${escapeHtml(f.title)}</h3>
+    <div id="qrHolder"></div>
+    <p class="muted" style="word-break:break-all;">${url}</p>
+    <div class="btn-row" style="justify-content:center;">
+      <button class="btn btn-ghost" id="qrDownload">Save image</button>
+      ${navigator.share ? `<button class="btn btn-ghost" id="qrShare">Share</button>` : ""}
+      <button class="btn btn-primary" id="qrClose">Close</button>
+    </div>
+  `);
+  // Wire up buttons FIRST so a QR rendering failure can't leave the popup stuck.
+  overlay.querySelector("#qrClose").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#qrDownload").addEventListener("click", () => {
+    const img = overlay.querySelector("#qrHolder img");
+    if (!img) return alert("No QR image to save — try Copy link instead.");
+    const link = document.createElement("a");
+    link.download = `${f.id}-qr.png`;
+    link.href = img.src;
+    link.click();
+  });
+  const shareBtn = overlay.querySelector("#qrShare");
+  if (shareBtn) shareBtn.addEventListener("click", () => navigator.share({ title: f.title, url }));
+
+  renderQrInto(overlay.querySelector("#qrHolder"), url);
+}
+
+function showDeviceQr(token) {
+  const url = `${SITE_ORIGIN}admin.html#token=${encodeURIComponent(token)}`;
+  const overlay = overlayShell(`
+    <h3>Sign in on another device</h3>
+    <div class="banner banner-error" style="text-align:left;">
+      <strong>Careful — this QR code is your admin access.</strong> Anyone who scans or
+      photographs it can publish and delete forms as you. Don't post it, save it, or leave
+      it on screen. Scan it once on your other device, then close this.
+    </div>
+    <div id="deviceQrHolder"></div>
+    <button class="btn btn-primary" id="deviceQrClose">Close</button>
+  `);
+  overlay.querySelector("#deviceQrClose").addEventListener("click", () => overlay.remove());
+  renderQrInto(overlay.querySelector("#deviceQrHolder"), url);
+}
+
+async function toggleClosed(f, token) {
+  try {
+    const { data, sha } = await ghGetJson(OWNER, REPO, `forms/${f.id}.json`, token);
+    data.closed = !data.closed;
+    await ghPutJson(OWNER, REPO, `forms/${f.id}.json`, data, `${data.closed ? "Close" : "Reopen"} form "${data.title}"`, token, sha);
+    const { data: manifest, sha: mSha } = await getManifest(token);
+    const entry = manifest.forms.find(x => x.id === f.id);
+    entry.closed = data.closed;
+    await ghPutJson(OWNER, REPO, "forms/manifest.json", manifest, "Update manifest", token, mSha);
+    renderDashboard(token);
+  } catch (e) {
+    console.error("Toggle closed failed:", e);
+    alert(e.unblockUrl
+      ? "GitHub flagged this as a possible secret. Open this link to allow it, then try again:\n" + e.unblockUrl
+      : "Couldn't update the form: " + (e.message || "unknown error"));
+  }
+}
+
+async function deleteForm(f, token) {
+  if (!confirm(`Delete "${f.title}"? This can't be undone from here.`)) return;
+  try {
+    const { sha } = await ghGetJson(OWNER, REPO, `forms/${f.id}.json`, token);
+    await ghDeleteFile(OWNER, REPO, `forms/${f.id}.json`, `Delete form "${f.title}"`, token, sha);
+    const { data: manifest, sha: mSha } = await getManifest(token);
+    manifest.forms = manifest.forms.filter(x => x.id !== f.id);
+    await ghPutJson(OWNER, REPO, "forms/manifest.json", manifest, "Update manifest", token, mSha);
+    renderDashboard(token);
+  } catch (e) {
+    console.error("Delete failed:", e);
+    alert("Couldn't delete the form: " + (e.message || "unknown error"));
+  }
+}
+
+/* ---------------- Builder ---------------- */
+
+let builderFields = [];
+let formIdForThisBuild = null; // assigned in renderBuilder, once github.js has loaded
+let editingManifestEntry = null; // set when editing an existing (closed) form
+
+async function editForm(f, token) {
+  try {
+    const { data } = await ghGetJson(OWNER, REPO, `forms/${f.id}.json`, token);
+    renderBuilder(token, data);
+  } catch (e) {
+    alert("Couldn't load that form to edit: " + (e.message || "unknown error"));
+  }
+}
+
+function fieldFromPublished(entry) {
+  if (entry.type === "static_text") return { uid: entry.id, type: "static_text", text: entry.text || "" };
+  if (entry.type === "image") return {
+    uid: entry.id, type: "image", alt: entry.alt || "",
+    mode: entry.externalUrl ? "external" : "existing",
+    externalUrl: entry.externalUrl || "", path: entry.path || "",
+  };
+  return {
+    uid: entry.id, type: entry.type, label: entry.label || "", required: !!entry.required,
+    maxLength: entry.maxLength || 500, options: entry.options ? [...entry.options, ""] : ["", ""],
+  };
+}
+
+function renderBuilder(token, existingForm) {
+  CURRENT_TOKEN = token;
+  editingManifestEntry = existingForm ? { id: existingForm.id, title: existingForm.title, createdAt: existingForm.createdAt } : null;
+
+  if (existingForm) {
+    formIdForThisBuild = existingForm.id;
+    builderFields = (existingForm.fields || []).map(fieldFromPublished);
+  } else {
+    builderFields = [];
+    formIdForThisBuild = randomId(8);
+  }
+  wrap.innerHTML = `
+    <div class="topbar">
+      <h1 class="mb-0">${existingForm ? "Edit form" : "New form"}</h1>
+      <button class="btn btn-ghost" id="backBtn">← Back</button>
+    </div>
+    <div class="card">
+      <div class="field">
+        <label for="bTitle">Form title</label>
+        <input type="text" id="bTitle" placeholder="e.g. Spring Picnic RSVP" value="${escapeHtml(existingForm?.title || "")}">
+      </div>
+      <div class="field">
+        <label for="bDesc">Description <span class="muted">(optional)</span></label>
+        <textarea id="bDesc" placeholder="A short note guests see at the top">${escapeHtml(existingForm?.description || "")}</textarea>
+      </div>
+    </div>
+    <div class="card">
+      <div id="fieldsArea"></div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="addFieldBtn">+ Add question</button>
+        <button class="btn btn-ghost" id="addTextBtn">+ Add text</button>
+        <button class="btn btn-ghost" id="addImageBtn">+ Add picture</button>
+      </div>
+    </div>
+    <div id="publishError"></div>
+    <button class="btn btn-primary btn-block" id="publishBtn">${existingForm ? "Save changes" : "Publish form"}</button>
+  `;
+  document.getElementById("backBtn").addEventListener("click", () => renderDashboard(token));
+  document.getElementById("addFieldBtn").addEventListener("click", addQuestionField);
+  document.getElementById("addTextBtn").addEventListener("click", addTextField);
+  document.getElementById("addImageBtn").addEventListener("click", addImageField);
+  document.getElementById("publishBtn").addEventListener("click", () => publishForm(token));
+  if (existingForm) renderFieldsArea();
+  else addQuestionField(); // start new forms with one question
+}
+
+function addQuestionField() {
+  builderFields.push({
+    uid: randomId(6), type: "text", label: "", required: true, maxLength: 500, options: ["", ""],
+  });
+  renderFieldsArea();
+}
+function addTextField() {
+  builderFields.push({ uid: randomId(6), type: "static_text", text: "" });
+  renderFieldsArea();
+}
+function addImageField() {
+  builderFields.push({ uid: randomId(6), type: "image", mode: "upload", alt: "" });
+  renderFieldsArea();
+}
+
+function removeField(uid) {
+  builderFields = builderFields.filter(f => f.uid !== uid);
+  renderFieldsArea();
+}
+
+function moveField(uid, dir) {
+  const i = builderFields.findIndex(f => f.uid === uid);
+  const j = i + dir;
+  if (j < 0 || j >= builderFields.length) return;
+  [builderFields[i], builderFields[j]] = [builderFields[j], builderFields[i]];
+  renderFieldsArea();
+}
+
+const TYPE_LABELS = {
+  text: "Short text", textarea: "Long text", email: "Email", number: "Number",
+  date: "Date picker", select: "Dropdown", radio: "Single choice", checkbox: "Multiple choice",
+};
+
+function fieldHeadHtml(i, kindLabel) {
+  return `
+    <div class="builder-field-head">
+      <strong>${kindLabel} ${i + 1}</strong>
+      <div class="btn-row">
+        <button class="icon-btn" data-act="up" title="Move up">↑</button>
+        <button class="icon-btn" data-act="down" title="Move down">↓</button>
+        <button class="icon-btn" data-act="del" title="Remove">✕</button>
+      </div>
+    </div>`;
+}
+
+function renderFieldsArea() {
+  const area = document.getElementById("fieldsArea");
+  area.innerHTML = builderFields.map((f, i) => {
+    if (f.type === "static_text") return textBlockHtml(f, i);
+    if (f.type === "image") return imageBlockHtml(f, i);
+    return questionBlockHtml(f, i);
+  }).join("");
+
+  builderFields.forEach(f => {
+    const el = area.querySelector(`[data-uid="${f.uid}"]`);
+    el.querySelector('[data-act="up"]').addEventListener("click", () => moveField(f.uid, -1));
+    el.querySelector('[data-act="down"]').addEventListener("click", () => moveField(f.uid, 1));
+    el.querySelector('[data-act="del"]').addEventListener("click", () => removeField(f.uid));
+
+    if (f.type === "static_text") wireTextBlock(el, f);
+    else if (f.type === "image") wireImageBlock(el, f, token_for_wiring());
+    else wireQuestionBlock(el, f);
+  });
+}
+
+// small helper so renderFieldsArea doesn't need the token threaded through everywhere
+let CURRENT_TOKEN = null;
+function token_for_wiring() { return CURRENT_TOKEN; }
+
+function questionBlockHtml(f, i) {
+  return `
+    <div class="builder-field" data-uid="${f.uid}">
+      ${fieldHeadHtml(i, "Question")}
+      <div class="field">
+        <label>Question text</label>
+        <input type="text" data-k="label" value="${escapeHtml(f.label)}" placeholder="e.g. Will you be attending?">
+      </div>
+      <div class="field">
+        <label>Answer type</label>
+        <select data-k="type">
+          ${Object.entries(TYPE_LABELS).map(([v, l]) => `<option value="${v}" ${f.type === v ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+      </div>
+      ${(f.type === "text" || f.type === "textarea") ? `
+        <div class="field">
+          <label>Maximum length (characters)</label>
+          <input type="number" data-k="maxLength" value="${f.maxLength}" min="10" max="20000">
+        </div>` : ""}
+      ${(f.type === "select" || f.type === "radio" || f.type === "checkbox") ? `
+        <div class="field">
+          <label>Options</label>
+          <div data-k="options">
+            ${f.options.map((o, oi) => `<div class="option-row"><input type="text" data-oi="${oi}" value="${escapeHtml(o)}" placeholder="Option ${oi + 1}"><button class="icon-btn" data-act="delopt" data-oi="${oi}">✕</button></div>`).join("")}
+          </div>
+          <button class="btn btn-ghost" data-act="addopt" style="margin-top:6px;">+ Add option</button>
+        </div>` : ""}
+      <label style="font-weight:400;"><input type="checkbox" data-k="required" ${f.required ? "checked" : ""} style="width:auto;margin-right:6px;"> Required</label>
+    </div>`;
+}
+
+function wireQuestionBlock(el, f) {
+  el.querySelector('[data-k="label"]').addEventListener("input", (e) => f.label = e.target.value);
+  el.querySelector('[data-k="type"]').addEventListener("change", (e) => { f.type = e.target.value; renderFieldsArea(); });
+  const maxEl = el.querySelector('[data-k="maxLength"]');
+  if (maxEl) maxEl.addEventListener("input", (e) => f.maxLength = Math.min(parseInt(e.target.value || "500", 10), 20000));
+  const reqEl = el.querySelector('[data-k="required"]');
+  if (reqEl) reqEl.addEventListener("change", (e) => f.required = e.target.checked);
+  const addOptBtn = el.querySelector('[data-act="addopt"]');
+  if (addOptBtn) addOptBtn.addEventListener("click", () => { f.options.push(""); renderFieldsArea(); });
+  el.querySelectorAll('[data-oi]').forEach(optEl => {
+    const oi = parseInt(optEl.getAttribute("data-oi"), 10);
+    if (optEl.tagName === "INPUT") optEl.addEventListener("input", (e) => f.options[oi] = e.target.value);
+    if (optEl.tagName === "BUTTON") optEl.addEventListener("click", () => { f.options.splice(oi, 1); renderFieldsArea(); });
+  });
+}
+
+function textBlockHtml(f, i) {
+  return `
+    <div class="builder-field" data-uid="${f.uid}">
+      ${fieldHeadHtml(i, "Text")}
+      <div class="field">
+        <label>Text shown between questions</label>
+        <textarea data-k="text" placeholder="e.g. Thanks for coming! A few quick questions...">${escapeHtml(f.text)}</textarea>
+      </div>
+    </div>`;
+}
+function wireTextBlock(el, f) {
+  el.querySelector('[data-k="text"]').addEventListener("input", (e) => f.text = e.target.value);
+}
+
+function imageBlockHtml(f, i) {
+  return `
+    <div class="builder-field" data-uid="${f.uid}">
+      ${fieldHeadHtml(i, "Picture")}
+      <div class="field">
+        <label>Source</label>
+        <select data-k="mode">
+          <option value="upload" ${f.mode === "upload" ? "selected" : ""}>Upload from this device</option>
+          <option value="existing" ${f.mode === "existing" ? "selected" : ""}>Use a photo already in the repo</option>
+          <option value="external" ${f.mode === "external" ? "selected" : ""}>Link to an image hosted elsewhere</option>
+        </select>
+      </div>
+      <div data-k="modeArea"></div>
+      <div class="field">
+        <label>Alt text <span class="muted">(for screen readers, optional)</span></label>
+        <input type="text" data-k="alt" value="${escapeHtml(f.alt || "")}" placeholder="Describe the image">
+      </div>
+    </div>`;
+}
+
+function wireImageBlock(el, f, token) {
+  el.querySelector('[data-k="mode"]').addEventListener("change", (e) => { f.mode = e.target.value; renderImageModeArea(el, f, token); });
+  el.querySelector('[data-k="alt"]').addEventListener("input", (e) => f.alt = e.target.value);
+  renderImageModeArea(el, f, token);
+}
+
+function renderImageModeArea(el, f, token) {
+  const area = el.querySelector('[data-k="modeArea"]');
+  if (f.mode === "upload") {
+    area.innerHTML = `
+      <div class="field">
+        <input type="file" accept="image/*" data-k="file">
+        <div class="muted" data-k="sizeInfo" style="margin-top:6px;"></div>
+        <img data-k="preview" style="max-width:100%; margin-top:8px; border-radius:8px; display:none;">
+      </div>`;
+    if (f.pendingUpload) {
+      area.querySelector('[data-k="sizeInfo"]').textContent =
+        `Original: ${formatBytes(f.pendingUpload.originalBytes)} → Compressed: ${formatBytes(f.pendingUpload.newBytes)}`;
+      const img = area.querySelector('[data-k="preview"]');
+      img.src = f.pendingUpload.dataUrl;
+      img.style.display = "block";
+    }
+    area.querySelector('[data-k="file"]').addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      area.querySelector('[data-k="sizeInfo"]').textContent = "Compressing…";
+      try {
+        const result = await compressImage(file);
+        f.pendingUpload = result;
+        area.querySelector('[data-k="sizeInfo"]').textContent =
+          `Original: ${formatBytes(result.originalBytes)} → Compressed: ${formatBytes(result.newBytes)}`;
+        const img = area.querySelector('[data-k="preview"]');
+        img.src = result.dataUrl;
+        img.style.display = "block";
+      } catch (err) {
+        area.querySelector('[data-k="sizeInfo"]').textContent = "Couldn't process that image.";
+      }
+    });
+  } else if (f.mode === "external") {
+    area.innerHTML = `
+      <div class="field">
+        <label>Image URL</label>
+        <input type="text" data-k="externalUrl" value="${escapeHtml(f.externalUrl || "")}" placeholder="https://...">
+      </div>`;
+    area.querySelector('[data-k="externalUrl"]').addEventListener("input", (e) => f.externalUrl = e.target.value);
+  } else if (f.mode === "existing") {
+    area.innerHTML = `<div class="muted">Loading existing photos…</div>`;
+    ghListDir(OWNER, REPO, "assets/uploads", token).then(files => {
+      const images = (files || []).filter(x => /\.(jpg|jpeg|png|gif|webp)$/i.test(x.name));
+      if (!images.length) {
+        area.innerHTML = `<p class="muted">No photos uploaded yet — upload one first, then it'll show up here for future forms.</p>`;
+        return;
+      }
+      area.innerHTML = `<div class="stack">${images.map(img => `
+        <label style="display:flex; align-items:center; gap:10px; border:1px solid var(--line); border-radius:8px; padding:8px; cursor:pointer;">
+          <input type="radio" name="existing-${f.uid}" value="${img.path}" ${f.path === img.path ? "checked" : ""} style="width:auto;">
+          <img src="https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@main/${img.path}" style="height:44px; border-radius:4px;">
+          <span>${escapeHtml(img.name)} <span class="muted">(${formatBytes(img.size)})</span></span>
+        </label>`).join("")}</div>`;
+      area.querySelectorAll(`input[name="existing-${f.uid}"]`).forEach(r =>
+        r.addEventListener("change", (e) => f.path = e.target.value));
+    }).catch(() => { area.innerHTML = `<p class="banner banner-error">Couldn't load existing photos.</p>`; });
+  }
+}
+
+async function publishForm(token) {
+  CURRENT_TOKEN = token;
+  const errEl = document.getElementById("publishError");
+  errEl.innerHTML = "";
+  const title = document.getElementById("bTitle").value.trim();
+  const description = document.getElementById("bDesc").value.trim();
+
+  if (!title) { errEl.innerHTML = `<div class="banner banner-error">Give your form a title.</div>`; return; }
+  if (!builderFields.length) { errEl.innerHTML = `<div class="banner banner-error">Add at least one question.</div>`; return; }
+  for (const f of builderFields) {
+    if (f.type === "static_text") continue;
+    if (f.type === "image") {
+      if (f.mode === "upload" && !f.pendingUpload) { errEl.innerHTML = `<div class="banner banner-error">Choose a photo to upload, or switch that block's source.</div>`; return; }
+      if (f.mode === "existing" && !f.path) { errEl.innerHTML = `<div class="banner banner-error">Pick an existing photo for that picture block.</div>`; return; }
+      if (f.mode === "external" && !f.externalUrl) { errEl.innerHTML = `<div class="banner banner-error">Add an image URL for that picture block.</div>`; return; }
+      continue;
+    }
+    if (!f.label.trim()) { errEl.innerHTML = `<div class="banner banner-error">Every question needs its text filled in.</div>`; return; }
+    if (["select", "radio", "checkbox"].includes(f.type) && f.options.filter(o => o.trim()).length < 2) {
+      errEl.innerHTML = `<div class="banner banner-error">"${escapeHtml(f.label)}" needs at least 2 options.</div>`;
+      return;
+    }
+  }
+
+  const btn = document.getElementById("publishBtn");
+  btn.disabled = true;
+
+  try {
+    const id = formIdForThisBuild;
+
+    // Upload any pending images first, since publishing is when they should hit the repo.
+    for (const f of builderFields) {
+      if (f.type === "image" && f.mode === "upload" && f.pendingUpload) {
+        btn.innerHTML = `<span class="spinner"></span> Uploading picture…`;
+        const path = `assets/uploads/${id}-${f.uid}.jpg`;
+        await ghPutContent(OWNER, REPO, path, f.pendingUpload.base64, `Add picture for form "${title}"`, token);
+        f.path = path;
+      }
+    }
+
+    btn.innerHTML = `<span class="spinner"></span> ${editingManifestEntry ? "Saving" : "Publishing"}…`;
+    const formDoc = {
+      id, title, description,
+      closed: editingManifestEntry ? true : false, // edited forms stay closed until you hit Reopen
+      createdAt: editingManifestEntry?.createdAt || new Date().toISOString(),
+      fields: builderFields.map(f => {
+        if (f.type === "static_text") return { id: f.uid, type: "static_text", text: f.text.trim() };
+        if (f.type === "image") return {
+          id: f.uid, type: "image", alt: f.alt || "",
+          ...(f.mode === "external" ? { externalUrl: f.externalUrl.trim() } : { path: f.path }),
+        };
+        return {
+          id: f.uid, type: f.type, label: f.label.trim(), required: f.required,
+          ...(f.maxLength ? { maxLength: f.maxLength } : {}),
+          ...(f.options ? { options: f.options.map(o => o.trim()).filter(Boolean) } : {}),
+        };
+      }),
+    };
+    const existingSha = editingManifestEntry ? await ghGetSha(OWNER, REPO, `forms/${id}.json`, token) : null;
+    await ghPutJson(OWNER, REPO, `forms/${id}.json`, formDoc, `${editingManifestEntry ? "Edit" : "Add"} form "${title}"`, token, existingSha);
+
+    const { data: manifest, sha } = await getManifest(token);
+    if (editingManifestEntry) {
+      const entry = manifest.forms.find(x => x.id === id);
+      if (entry) { entry.title = title; entry.closed = true; }
+    } else {
+      manifest.forms.unshift({ id, title, closed: false, createdAt: formDoc.createdAt });
+    }
+    await ghPutJson(OWNER, REPO, "forms/manifest.json", manifest, `List form "${title}" in manifest`, token, sha);
+
+    renderDashboard(token);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = editingManifestEntry ? "Save changes" : "Publish form";
+    errEl.innerHTML = writeErrorHtml(e, "publishRetryBtn");
+    document.getElementById("publishRetryBtn")?.addEventListener("click", () => publishForm(token));
+  }
+}
+
+(async function start() {
+  try {
+    await loadAppScript("assets/github.js");
+    const detected = detectOwnerRepo();
+    OWNER = detected?.owner;
+    REPO = detected?.repo;
+    boot();
+  } catch (e) {
+    console.error("Startup failed:", e);
+    wrap.innerHTML = `<div class="card center"><h1>Couldn't start the page</h1>
+      <p class="muted">${e.message || "Unknown error"}</p>
+      <p class="muted">Check that this URL loads real JavaScript (not a 404 page):
+      <a href="assets/github.js">assets/github.js</a></p></div>`;
+  }
+})();
+</script>
+</body>
+</html>
